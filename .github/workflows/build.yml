@@ -1,0 +1,125 @@
+name: Build TVBoxHook APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Cache Gradle packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Generate Gradle Wrapper
+      run: |
+        # 生成 gradle wrapper 文件
+        gradle wrapper --gradle-version 8.0
+        # 确保换行符是 Unix 格式
+        sed -i 's/\r$//' gradlew
+        chmod +x gradlew
+
+    - name: Build with Gradle
+      run: ./gradlew assembleRelease
+
+    - name: Generate signing key
+      run: |
+        echo "Generating signing key..."
+        keytool -genkey -v \
+          -keystore tvboxhook.keystore \
+          -alias tvboxhook \
+          -keyalg RSA \
+          -keysize 2048 \
+          -validity 10000 \
+          -storepass tvboxhook \
+          -keypass tvboxhook \
+          -dname "CN=TVBoxHook, OU=TVBoxHook, O=TVBoxHook, L=Unknown, ST=Unknown, C=Unknown"
+        echo "Signing key generated successfully"
+
+    - name: Sign APK
+      run: |
+        echo "Signing APK..."
+        ${ANDROID_SDK_ROOT}/build-tools/33.0.0/apksigner sign \
+          --ks tvboxhook.keystore \
+          --ks-pass pass:tvboxhook \
+          --key-pass pass:tvboxhook \
+          --out TVBoxHook-signed.apk \
+          app/build/outputs/apk/release/app-release-unsigned.apk
+        echo "APK signed successfully"
+
+    - name: Verify APK
+      run: |
+        echo "Verifying APK..."
+        ${ANDROID_SDK_ROOT}/build-tools/33.0.0/apksigner verify TVBoxHook-signed.apk
+        ls -lh TVBoxHook-signed.apk
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: TVBoxHook-signed
+        path: TVBoxHook-signed.apk
+
+    - name: Create Release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: TVBoxHook-signed.apk
+        tag_name: v${{ github.run_number }}
+        name: TVBoxHook v${{ github.run_number }}
+        body: |
+          # TVBoxHook LSPosed 模块
+
+          ## 自动构建版本
+          构建时间: ${{ github.event.head_commit.timestamp }}
+          提交: ${{ github.event.head_commit.message }}
+
+          ## 安装方法
+          1. 下载 TVBoxHook-signed.apk
+          2. 安装到设备: `adb install TVBoxHook-signed.apk`
+          3. 在 LSPosed 中启用模块
+          4. 选择 TVBox 应用 (com.ysc.tvbox)
+          5. 重启 TVBox 应用
+
+          ## 功能特性
+          - ✅ 监控 SO 加载 (ftyguard_v7.so / ftyguard_v8.so)
+          - ✅ 捕获文件操作 (ftyshinidie.guard)
+          - ✅ 监控加密/解密操作
+          - ✅ 自动分析 Hawk2.xml 配置
+          - ✅ 保存解密数据到 /sdcard/TVBoxHook/
+
+          ## 使用方法
+          1. 确保 TVBox 应用已安装
+          2. 在 LSPosed 中启用本模块
+          3. 打开 TVBox 应用
+          4. 浏览频道或加载视频
+          5. 查看 `/sdcard/TVBoxHook/hook.log` 获取日志
+
+          ## 注意事项
+          - 需要 root 权限
+          - 需要 LSPosed 框架
+          - 仅用于学习研究目的
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
