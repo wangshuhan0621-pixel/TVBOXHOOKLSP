@@ -22,37 +22,43 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
  * Hook SO 加载，Dump 解密后的代码
- * 简化版本 - 只 Hook Runtime.loadLibrary0，不 Hook System.loadLibrary
+ * 捕获所有可能的 SO 加载方式
  */
 public class SODumpHook {
     private static final String TAG = "SODumpHook";
     private static String LOG_DIR;
     private static Context appContext;
+    private static Handler handler;
+    private static boolean hasDumped = false;
     
     public static void init(XC_LoadPackage.LoadPackageParam lpparam, Context context, String logDir) {
         LOG_DIR = logDir;
         appContext = context;
+        handler = new Handler(Looper.getMainLooper());
         
         XposedBridge.log("[" + TAG + "] 初始化 SO Dump Hook...");
         
-        // 只 Hook Runtime.loadLibrary0，不 Hook System.loadLibrary
+        // Hook Runtime.loadLibrary0
         hookRuntimeLoadLibrary(lpparam);
+        
+        // Hook System.load (从文件路径加载)
+        hookSystemLoad(lpparam);
+        
+        // 定时扫描 maps 查找 ftyguard
+        startMapsScanner();
     }
     
     private static void hookRuntimeLoadLibrary(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            // Hook Runtime.loadLibrary0 - 这是实际加载 SO 的方法
             XposedHelpers.findAndHookMethod("java.lang.Runtime", lpparam.classLoader,
                 "loadLibrary0", ClassLoader.class, String.class, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         String libName = (String) param.args[1];
+                        XposedBridge.log("[" + TAG + "] Runtime.loadLibrary0: " + libName);
                         if (libName != null && libName.contains("ftyguard")) {
-                            XposedBridge.log("[" + TAG + "] [!!!] Runtime.loadLibrary0: " + libName);
-                            // 延迟 Dump，等待解密完成
-                            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                                dumpSO(libName);
-                            }, 2000);
+                            XposedBridge.log("[" + TAG + "] [!!!] 捕获 ftyguard 加载: " + libName);
+                            scheduleDump(libName);
                         }
                     }
                 });
@@ -62,11 +68,95 @@ public class SODumpHook {
         }
     }
     
+    private static void hookSystemLoad(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            // Hook System.load - 用于从文件路径加载 SO
+            XposedHelpers.findAndHookMethod("java.lang.System", lpparam.classLoader,
+                "load", String.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        String libPath = (String) param.args[0];
+                        XposedBridge.log("[" + TAG + "] System.load: " + libPath);
+                        if (libPath != null && libPath.contains("ftyguard")) {
+                            XposedBridge.log("[" + TAG + "] [!!!] 捕获 ftyguard 文件加载: " + libPath);
+                            scheduleDump("ftyguard");
+                        }
+                    }
+                });
+            XposedBridge.log("[" + TAG + "] System.load Hook 成功");
+        } catch (Exception e) {
+            XposedBridge.log("[" + TAG + "] System.load Hook 失败: " + e.getMessage());
+        }
+        
+        try {
+            // Hook Runtime.load0
+            XposedHelpers.findAndHookMethod("java.lang.Runtime", lpparam.classLoader,
+                "load0", ClassLoader.class, String.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        String libPath = (String) param.args[1];
+                        XposedBridge.log("[" + TAG + "] Runtime.load0: " + libPath);
+                        if (libPath != null && libPath.contains("ftyguard")) {
+                            XposedBridge.log("[" + TAG + "] [!!!] 捕获 ftyguard Runtime 加载: " + libPath);
+                            scheduleDump("ftyguard");
+                        }
+                    }
+                });
+            XposedBridge.log("[" + TAG + "] Runtime.load0 Hook 成功");
+        } catch (Exception e) {
+            XposedBridge.log("[" + TAG + "] Runtime.load0 Hook 失败: " + e.getMessage());
+        }
+    }
+    
+    private static void startMapsScanner() {
+        // 延迟 5 秒后开始扫描，每 3 秒扫描一次
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                scanMapsForFtyguard();
+                if (!hasDumped) {
+                    handler.postDelayed(this, 3000);
+                }
+            }
+        }, 5000);
+        XposedBridge.log("[" + TAG + "] Maps 扫描器已启动");
+    }
+    
+    private static void scanMapsForFtyguard() {
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream("/proc/self/maps")));
+            String line;
+            boolean found = false;
+            
+            while ((line = reader.readLine()) != null) {
+                if (line.contains("ftyguard")) {
+                    found = true;
+                    XposedBridge.log("[" + TAG + "] [!!!] Maps 中发现 ftyguard: " + line);
+                }
+            }
+            reader.close();
+            
+            if (found && !hasDumped) {
+                hasDumped = true;
+                XposedBridge.log("[" + TAG + "] [!!!] 发现 ftyguard，开始 Dump...");
+                dumpSO("ftyguard");
+            }
+        } catch (Exception e) {
+            XposedBridge.log("[" + TAG + "] Maps 扫描失败: " + e.getMessage());
+        }
+    }
+    
+    private static void scheduleDump(String libName) {
+        handler.postDelayed(() -> {
+            dumpSO(libName);
+        }, 2000);
+    }
+    
     private static void dumpSO(String libName) {
         try {
             XposedBridge.log("[" + TAG + "] 开始 Dump SO: " + libName);
             
-            // 从 maps 读取内存映射
             List<MemoryRegion> regions = parseMaps(libName);
             
             if (regions.isEmpty()) {
@@ -76,7 +166,6 @@ public class SODumpHook {
             
             XposedBridge.log("[" + TAG + "] 找到 " + regions.size() + " 个内存区域");
             
-            // Dump 每个区域
             for (MemoryRegion region : regions) {
                 XposedBridge.log("[" + TAG + "] Dump 区域: " + region);
                 dumpMemoryRegion(region, libName);
@@ -106,7 +195,6 @@ public class SODumpHook {
                         String perms = matcher.group(3);
                         String name = matcher.group(7).trim();
                         
-                        // 只 Dump 可执行和可读的代码段
                         if (perms.contains("r")) {
                             regions.add(new MemoryRegion(start, end, perms, name));
                             XposedBridge.log("[" + TAG + "] 区域: " + Long.toHexString(start) + "-" + Long.toHexString(end) + " " + perms);
@@ -125,11 +213,10 @@ public class SODumpHook {
     private static void dumpMemoryRegion(MemoryRegion region, String libName) {
         try {
             long size = region.end - region.start;
-            if (size <= 0 || size > 50 * 1024 * 1024) {  // 限制 50MB
+            if (size <= 0 || size > 50 * 1024 * 1024) {
                 return;
             }
             
-            // 读取内存
             byte[] buffer = new byte[(int) size];
             RandomAccessFile mem = new RandomAccessFile("/proc/self/mem", "r");
             mem.seek(region.start);
@@ -137,7 +224,6 @@ public class SODumpHook {
             mem.close();
             
             if (read > 0) {
-                // 保存到文件
                 String filename = String.format("dump_%s_%x_%x.bin", 
                     libName.replaceAll("[^a-zA-Z0-9]", "_"),
                     region.start, region.end);
