@@ -2,19 +2,16 @@ package com.example.tvboxhook;
 
 import android.app.Application;
 import android.content.Context;
-import android.util.Log;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.lang.reflect.Method;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -25,11 +22,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class TVBoxHook implements IXposedHookLoadPackage {
     private static final String TAG = "TVBoxHook";
     private static final String TARGET_PACKAGE = "com.ysc.tvbox";
-    private static final String LOG_DIR = "/sdcard/TVBoxHook";
+    private static String LOG_DIR = "/sdcard/TVBoxHook";
     
-    private static Map<String, byte[]> capturedData = new HashMap<>();
-    private static StringBuilder logBuilder = new StringBuilder();
-    private static int captureCount = 0;
+    private static ExecutorService executor = Executors.newSingleThreadExecutor();
+    private static boolean isLogDirReady = false;
     
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
@@ -41,28 +37,8 @@ public class TVBoxHook implements IXposedHookLoadPackage {
         XposedBridge.log("[TVBoxHook] 目标应用已加载: " + lpparam.packageName);
         XposedBridge.log("[TVBoxHook] ================================");
         
-        log("应用已加载: " + lpparam.packageName);
-        
-        // 创建日志目录
-        createLogDir();
-        
-        // Hook 各种方法
-        hookSystemLoadLibrary(lpparam);
-        hookFileOperations(lpparam);
-        hookCryptoOperations(lpparam);
-        hookNativeMethods(lpparam);
+        // Hook Application.attach 来获取 Context
         hookApplication(lpparam);
-    }
-    
-    private void createLogDir() {
-        try {
-            File dir = new File(LOG_DIR);
-            if (!dir.exists()) {
-                dir.mkdirs();
-            }
-        } catch (Exception e) {
-            XposedBridge.log("[TVBoxHook] 创建目录失败: " + e.getMessage());
-        }
     }
     
     private void hookApplication(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -71,14 +47,59 @@ public class TVBoxHook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     Context context = (Context) param.args[0];
-                    log("Application attached, context: " + context);
                     
-                    // Hook SharedPreferences
-                    hookSharedPreferences(context);
+                    // 使用应用私有目录，避免权限问题
+                    File externalDir = context.getExternalFilesDir(null);
+                    if (externalDir != null) {
+                        LOG_DIR = externalDir.getAbsolutePath() + "/TVBoxHook";
+                    } else {
+                        LOG_DIR = context.getFilesDir().getAbsolutePath() + "/TVBoxHook";
+                    }
+                    
+                    XposedBridge.log("[TVBoxHook] 日志目录: " + LOG_DIR);
+                    
+                    // 创建日志目录
+                    createLogDir();
+                    
+                    log("应用已加载: " + context.getPackageName());
+                    log("日志目录: " + LOG_DIR);
+                    
+                    // 延迟初始化其他 Hook，避免启动时冲突
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        initHooks(lpparam, context);
+                    }, 2000);
                 }
             });
         } catch (Exception e) {
-            log("Hook Application 失败: " + e.getMessage());
+            XposedBridge.log("[TVBoxHook] Hook Application 失败: " + e.getMessage());
+        }
+    }
+    
+    private void initHooks(XC_LoadPackage.LoadPackageParam lpparam, Context context) {
+        try {
+            log("初始化 Hooks...");
+            // 不 Hook System.loadLibrary，改用监控文件操作
+            hookFileOperations(lpparam);
+            hookCryptoOperations(lpparam);
+            hookSharedPreferences(context);
+        } catch (Exception e) {
+            log("初始化 Hooks 失败: " + e.getMessage());
+        }
+    }
+    
+    private void createLogDir() {
+        try {
+            File dir = new File(LOG_DIR);
+            if (!dir.exists()) {
+                boolean created = dir.mkdirs();
+                isLogDirReady = created;
+                XposedBridge.log("[TVBoxHook] 创建目录 " + (created ? "成功" : "失败") + ": " + LOG_DIR);
+            } else {
+                isLogDirReady = true;
+            }
+        } catch (Exception e) {
+            XposedBridge.log("[TVBoxHook] 创建目录异常: " + e.getMessage());
+            isLogDirReady = false;
         }
     }
     
@@ -89,11 +110,19 @@ public class TVBoxHook implements IXposedHookLoadPackage {
             if (hawkFile.exists()) {
                 log("发现 Hawk2.xml: " + hawkFile.getAbsolutePath());
                 
-                // 读取并分析 Hawk2.xml
-                String content = readFile(hawkFile);
-                if (content != null) {
-                    analyzeHawkContent(content);
-                }
+                // 异步读取文件
+                executor.execute(() -> {
+                    try {
+                        String content = readFile(hawkFile);
+                        if (content != null) {
+                            analyzeHawkContent(content);
+                        }
+                    } catch (Exception e) {
+                        log("读取 Hawk2.xml 失败: " + e.getMessage());
+                    }
+                });
+            } else {
+                log("Hawk2.xml 不存在");
             }
         } catch (Exception e) {
             log("Hook SharedPreferences 失败: " + e.getMessage());
@@ -123,102 +152,52 @@ public class TVBoxHook implements IXposedHookLoadPackage {
         String[] lines = content.split("\n");
         for (String line : lines) {
             if (line.contains("##") && line.contains("@")) {
-                // 提取 key 和 value
                 int keyStart = line.indexOf("\"");
                 int keyEnd = line.indexOf("\"", keyStart + 1);
                 if (keyStart != -1 && keyEnd != -1) {
                     String key = line.substring(keyStart + 1, keyEnd);
                     log("发现加密数据 - Key: " + key);
-                    
-                    // 保存到文件
                     saveToFile("hawk_" + key + ".txt", line.getBytes());
                 }
             }
         }
     }
     
-    private void hookSystemLoadLibrary(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            XposedHelpers.findAndHookMethod("java.lang.System", lpparam.classLoader,
-                "loadLibrary", String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        String libName = (String) param.args[0];
-                        log("System.loadLibrary(): " + libName);
-                        
-                        if (libName.contains("guard") || libName.contains("fty")) {
-                            log("[!!!] 加载 guard SO: " + libName);
-                            XposedBridge.log("[TVBoxHook] [!!!] 加载 guard SO: " + libName);
-                        }
-                    }
-                });
-        } catch (Exception e) {
-            log("Hook System.loadLibrary 失败: " + e.getMessage());
-        }
-    }
-    
     private void hookFileOperations(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            // Hook FileInputStream 构造函数
+            // Hook FileInputStream 构造函数 - 只监控目标文件
             XposedHelpers.findAndHookConstructor("java.io.FileInputStream", lpparam.classLoader,
                 File.class, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         File file = (File) param.args[0];
+                        if (file == null) return;
                         String path = file.getAbsolutePath();
                         
-                        if (path.contains("ftyshinidie") || path.contains("ftyguard")) {
+                        // 只监控包含 guard 或 fty 的文件路径
+                        if (path.contains("guard") || path.contains("fty")) {
                             log("[!!!] FileInputStream 打开: " + path);
-                            XposedBridge.log("[TVBoxHook] [!!!] 打开文件: " + path);
                         }
                     }
                 });
             
-            // Hook FileInputStream read
+            // Hook FileInputStream read - 只监控大文件读取
             XposedHelpers.findAndHookMethod("java.io.FileInputStream", lpparam.classLoader,
                 "read", byte[].class, int.class, int.class, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         int bytesRead = (int) param.getResult();
-                        if (bytesRead > 10000) {
+                        // 只监控大于 100KB 的读取
+                        if (bytesRead > 100000) {
                             byte[] buffer = (byte[]) param.args[0];
-                            log("[!!!] 读取大文件: " + bytesRead + " bytes");
-                            log("    前16字节: " + bytesToHex(buffer, 16));
-                            
-                            // 检查是否是 ZIP 格式
-                            if (buffer[0] == 0x50 && buffer[1] == 0x4B && 
-                                buffer[2] == 0x03 && buffer[3] == 0x04) {
-                                log("[***] 发现解密后的 ZIP 数据!");
-                                saveDecryptedData(buffer, bytesRead, "decrypted_zip_" + System.currentTimeMillis() + ".bin");
-                            }
-                            
-                            // 检查是否是 DEX 格式
-                            if (buffer[0] == 0x64 && buffer[1] == 0x65 && 
-                                buffer[2] == 0x78 && buffer[3] == 0x0A) {
-                                log("[***] 发现 DEX 数据!");
-                                saveDecryptedData(buffer, bytesRead, "decrypted_dex_" + System.currentTimeMillis() + ".dex");
-                            }
-                        }
-                    }
-                });
-                
-            // Hook FileOutputStream write
-            XposedHelpers.findAndHookMethod("java.io.FileOutputStream", lpparam.classLoader,
-                "write", byte[].class, int.class, int.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        byte[] buffer = (byte[]) param.args[0];
-                        int offset = (int) param.args[1];
-                        int count = (int) param.args[2];
-                        
-                        if (count > 10000) {
-                            log("[!!!] 写入大文件: " + count + " bytes");
-                            log("    前16字节: " + bytesToHex(buffer, 16));
-                            
-                            // 检查是否是 ZIP 格式
-                            if (buffer[offset] == 0x50 && buffer[offset+1] == 0x4B) {
-                                log("[***] 写入 ZIP 数据!");
-                                saveDecryptedData(buffer, count, "written_zip_" + System.currentTimeMillis() + ".bin");
+                            if (buffer != null && buffer.length >= 4) {
+                                log("[!!!] 读取大文件: " + bytesRead + " bytes");
+                                
+                                // 检查是否是 ZIP 格式
+                                if (buffer[0] == 0x50 && buffer[1] == 0x4B) {
+                                    log("[***] 发现 ZIP 数据!");
+                                    saveDecryptedData(buffer, bytesRead, "zip_" + System.currentTimeMillis() + ".bin");
+                                }
                             }
                         }
                     }
@@ -231,29 +210,19 @@ public class TVBoxHook implements IXposedHookLoadPackage {
     
     private void hookCryptoOperations(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            // Hook javax.crypto.Cipher
             XposedHelpers.findAndHookMethod("javax.crypto.Cipher", lpparam.classLoader,
                 "doFinal", byte[].class, new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        byte[] input = (byte[]) param.args[0];
-                        if (input != null && input.length > 100) {
-                            log("[!!!] Cipher.doFinal() 输入: " + input.length + " bytes");
-                            log("    前16字节: " + bytesToHex(input, 16));
-                        }
-                    }
-                    
-                    @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         byte[] output = (byte[]) param.getResult();
-                        if (output != null && output.length > 100) {
+                        // 只监控大于 100KB 的输出
+                        if (output != null && output.length > 100000) {
                             log("[!!!] Cipher.doFinal() 输出: " + output.length + " bytes");
-                            log("    前16字节: " + bytesToHex(output, 16));
                             
                             // 检查是否是 ZIP 格式
-                            if (output[0] == 0x50 && output[1] == 0x4B) {
+                            if (output.length >= 4 && output[0] == 0x50 && output[1] == 0x4B) {
                                 log("[***] 解密后得到 ZIP 数据!");
-                                saveDecryptedData(output, output.length, "cipher_decrypted_" + System.currentTimeMillis() + ".bin");
+                                saveDecryptedData(output, output.length, "decrypted_" + System.currentTimeMillis() + ".bin");
                             }
                         }
                     }
@@ -263,89 +232,56 @@ public class TVBoxHook implements IXposedHookLoadPackage {
         }
     }
     
-    private void hookNativeMethods(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            // Hook Runtime.loadLibrary0
-            XposedHelpers.findAndHookMethod("java.lang.Runtime", lpparam.classLoader,
-                "loadLibrary0", Class.class, String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        String libName = (String) param.args[1];
-                        log("Runtime.loadLibrary0(): " + libName);
-                        
-                        if (libName.contains("guard")) {
-                            log("[!!!] 加载 guard 库: " + libName);
-                        }
-                    }
-                });
-            
-            // Hook native 方法调用
-            XposedHelpers.findAndHookMethod("java.lang.Runtime", lpparam.classLoader,
-                "nativeLoad", String.class, ClassLoader.class, String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        String filename = (String) param.args[0];
-                        log("Runtime.nativeLoad(): " + filename);
-                    }
-                });
-        } catch (Exception e) {
-            log("Hook NativeMethods 失败: " + e.getMessage());
-        }
-    }
-    
     private void saveDecryptedData(byte[] data, int length, String filename) {
-        try {
-            File outputFile = new File(LOG_DIR, filename);
-            FileOutputStream fos = new FileOutputStream(outputFile);
-            fos.write(data, 0, length);
-            fos.close();
-            
-            log("[+] 已保存数据: " + outputFile.getAbsolutePath() + " (" + length + " bytes)");
-            XposedBridge.log("[TVBoxHook] [+] 保存数据: " + filename);
-            
-            captureCount++;
-        } catch (IOException e) {
-            log("保存数据失败: " + e.getMessage());
+        if (!isLogDirReady) {
+            XposedBridge.log("[TVBoxHook] 日志目录未就绪，无法保存数据");
+            return;
         }
+        
+        executor.execute(() -> {
+            try {
+                File outputFile = new File(LOG_DIR, filename);
+                FileOutputStream fos = new FileOutputStream(outputFile);
+                fos.write(data, 0, Math.min(length, data.length));
+                fos.close();
+                XposedBridge.log("[TVBoxHook] [+] 已保存: " + filename);
+            } catch (IOException e) {
+                XposedBridge.log("[TVBoxHook] 保存数据失败: " + e.getMessage());
+            }
+        });
     }
     
     private void saveToFile(String filename, byte[] data) {
-        try {
-            File outputFile = new File(LOG_DIR, filename);
-            FileOutputStream fos = new FileOutputStream(outputFile);
-            fos.write(data);
-            fos.close();
-            log("[+] 已保存文件: " + filename);
-        } catch (IOException e) {
-            log("保存文件失败: " + e.getMessage());
-        }
-    }
-    
-    private String bytesToHex(byte[] bytes, int length) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < Math.min(bytes.length, length); i++) {
-            sb.append(String.format("%02x ", bytes[i]));
-        }
-        return sb.toString();
+        if (!isLogDirReady) return;
+        
+        executor.execute(() -> {
+            try {
+                File outputFile = new File(LOG_DIR, filename);
+                FileOutputStream fos = new FileOutputStream(outputFile);
+                fos.write(data);
+                fos.close();
+            } catch (IOException e) {
+                XposedBridge.log("[TVBoxHook] 保存文件失败: " + e.getMessage());
+            }
+        });
     }
     
     private void log(String message) {
         String logMsg = "[" + System.currentTimeMillis() + "] " + message;
-        logBuilder.append(logMsg).append("\n");
-        XposedBridge.log("[TVBoxHook] " + message);
+        XposedBridge.log("[TVBoxHook] " + logMsg);
         
-        // 保存日志
-        saveLog();
-    }
-    
-    private void saveLog() {
-        try {
-            File logFile = new File(LOG_DIR, "hook.log");
-            FileOutputStream fos = new FileOutputStream(logFile);
-            fos.write(logBuilder.toString().getBytes());
-            fos.close();
-        } catch (IOException e) {
-            XposedBridge.log("[TVBoxHook] 保存日志失败: " + e.getMessage());
+        // 异步保存日志
+        if (isLogDirReady) {
+            executor.execute(() -> {
+                try {
+                    File logFile = new File(LOG_DIR, "hook.log");
+                    FileOutputStream fos = new FileOutputStream(logFile, true);
+                    fos.write((logMsg + "\n").getBytes());
+                    fos.close();
+                } catch (IOException e) {
+                    // 忽略日志保存错误
+                }
+            });
         }
     }
 }
