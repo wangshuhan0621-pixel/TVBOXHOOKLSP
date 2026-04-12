@@ -34,9 +34,14 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-gradle-
 
+    - name: Setup Gradle 8.0
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: "8.0"
+
     - name: Generate Gradle Wrapper
       run: |
-        # 生成 gradle wrapper 文件
+        # 使用 Gradle 8.0 生成 wrapper 文件
         gradle wrapper --gradle-version 8.0
         # 确保换行符是 Unix 格式
         sed -i 's/\r$//' gradlew
