@@ -39,16 +39,8 @@ jobs:
       with:
         gradle-version: "8.0"
 
-    - name: Generate Gradle Wrapper
-      run: |
-        # 使用 Gradle 8.0 生成 wrapper 文件
-        gradle wrapper --gradle-version 8.0
-        # 确保换行符是 Unix 格式
-        sed -i 's/\r$//' gradlew
-        chmod +x gradlew
-
     - name: Build with Gradle
-      run: ./gradlew assembleRelease
+      run: gradle assembleRelease
 
     - name: Generate signing key
       run: |
