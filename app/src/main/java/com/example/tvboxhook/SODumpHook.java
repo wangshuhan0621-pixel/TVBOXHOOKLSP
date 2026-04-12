@@ -9,11 +9,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
-import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -21,15 +18,14 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Hook SO 加载，Dump 解密后的代码
- * 捕获所有可能的 SO 加载方式
+ * Hook SO 加载，记录 SO 加载信息
+ * 简化版本 - 只记录日志，不读取内存避免崩溃
  */
 public class SODumpHook {
     private static final String TAG = "SODumpHook";
     private static String LOG_DIR;
     private static Context appContext;
     private static Handler handler;
-    private static boolean hasDumped = false;
     
     public static void init(XC_LoadPackage.LoadPackageParam lpparam, Context context, String logDir) {
         LOG_DIR = logDir;
@@ -41,10 +37,10 @@ public class SODumpHook {
         // Hook Runtime.loadLibrary0
         hookRuntimeLoadLibrary(lpparam);
         
-        // Hook System.load (从文件路径加载)
+        // Hook System.load
         hookSystemLoad(lpparam);
         
-        // 定时扫描 maps 查找 ftyguard
+        // 定时扫描 maps
         startMapsScanner();
     }
     
@@ -58,7 +54,7 @@ public class SODumpHook {
                         XposedBridge.log("[" + TAG + "] Runtime.loadLibrary0: " + libName);
                         if (libName != null && libName.contains("ftyguard")) {
                             XposedBridge.log("[" + TAG + "] [!!!] 捕获 ftyguard 加载: " + libName);
-                            scheduleDump(libName);
+                            saveMapsToFile();
                         }
                     }
                 });
@@ -70,7 +66,6 @@ public class SODumpHook {
     
     private static void hookSystemLoad(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            // Hook System.load - 用于从文件路径加载 SO
             XposedHelpers.findAndHookMethod("java.lang.System", lpparam.classLoader,
                 "load", String.class, new XC_MethodHook() {
                     @Override
@@ -79,7 +74,7 @@ public class SODumpHook {
                         XposedBridge.log("[" + TAG + "] System.load: " + libPath);
                         if (libPath != null && libPath.contains("ftyguard")) {
                             XposedBridge.log("[" + TAG + "] [!!!] 捕获 ftyguard 文件加载: " + libPath);
-                            scheduleDump("ftyguard");
+                            saveMapsToFile();
                         }
                     }
                 });
@@ -90,152 +85,71 @@ public class SODumpHook {
     }
     
     private static void startMapsScanner() {
-        // 延迟 5 秒后开始扫描，每 3 秒扫描一次
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
-                scanMapsForFtyguard();
-                if (!hasDumped) {
-                    handler.postDelayed(this, 3000);
-                }
+                scanAndSaveMaps();
+                handler.postDelayed(this, 5000);
             }
-        }, 5000);
+        }, 3000);
         XposedBridge.log("[" + TAG + "] Maps 扫描器已启动");
     }
     
-    private static void scanMapsForFtyguard() {
+    private static void scanAndSaveMaps() {
         try {
+            List<String> ftyguardLines = new ArrayList<>();
             BufferedReader reader = new BufferedReader(new InputStreamReader(
                 new FileInputStream("/proc/self/maps")));
             String line;
-            boolean found = false;
             
             while ((line = reader.readLine()) != null) {
                 if (line.contains("ftyguard")) {
-                    found = true;
+                    ftyguardLines.add(line);
                     XposedBridge.log("[" + TAG + "] [!!!] Maps 中发现 ftyguard: " + line);
                 }
             }
             reader.close();
             
-            if (found && !hasDumped) {
-                hasDumped = true;
-                XposedBridge.log("[" + TAG + "] [!!!] 发现 ftyguard，开始 Dump...");
-                dumpSO("ftyguard");
+            if (!ftyguardLines.isEmpty()) {
+                saveFtyguardInfo(ftyguardLines);
             }
         } catch (Exception e) {
             XposedBridge.log("[" + TAG + "] Maps 扫描失败: " + e.getMessage());
         }
     }
     
-    private static void scheduleDump(String libName) {
-        handler.postDelayed(() -> {
-            dumpSO(libName);
-        }, 2000);
-    }
-    
-    private static void dumpSO(String libName) {
+    private static void saveMapsToFile() {
         try {
-            XposedBridge.log("[" + TAG + "] 开始 Dump SO: " + libName);
+            File outputFile = new File(LOG_DIR, "maps_full.txt");
+            FileOutputStream fos = new FileOutputStream(outputFile);
             
-            List<MemoryRegion> regions = parseMaps(libName);
-            
-            if (regions.isEmpty()) {
-                XposedBridge.log("[" + TAG + "] 未找到 SO 内存映射: " + libName);
-                return;
-            }
-            
-            XposedBridge.log("[" + TAG + "] 找到 " + regions.size() + " 个内存区域");
-            
-            for (MemoryRegion region : regions) {
-                XposedBridge.log("[" + TAG + "] Dump 区域: " + region);
-                dumpMemoryRegion(region, libName);
-            }
-            
-        } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] Dump 失败: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-    
-    private static List<MemoryRegion> parseMaps(String libName) {
-        List<MemoryRegion> regions = new ArrayList<>();
-        
-        try {
             BufferedReader reader = new BufferedReader(new InputStreamReader(
                 new FileInputStream("/proc/self/maps")));
             String line;
-            Pattern pattern = Pattern.compile("^([0-9a-f]+)-([0-9a-f]+)\\s+([rwxp-]+)\\s+([0-9a-f]+)\\s+([0-9a-f:]+)\\s+([0-9]+)\\s*(.*)$");
             
             while ((line = reader.readLine()) != null) {
-                if (line.contains("ftyguard")) {
-                    Matcher matcher = pattern.matcher(line);
-                    if (matcher.find()) {
-                        long start = Long.parseLong(matcher.group(1), 16);
-                        long end = Long.parseLong(matcher.group(2), 16);
-                        String perms = matcher.group(3);
-                        String name = matcher.group(7).trim();
-                        
-                        if (perms.contains("r")) {
-                            regions.add(new MemoryRegion(start, end, perms, name));
-                            XposedBridge.log("[" + TAG + "] 区域: " + Long.toHexString(start) + "-" + Long.toHexString(end) + " " + perms);
-                        }
-                    }
-                }
+                fos.write((line + "\n").getBytes());
             }
             reader.close();
+            fos.close();
+            
+            XposedBridge.log("[" + TAG + "] [+] Maps 已保存: " + outputFile.getAbsolutePath());
         } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] 解析 maps 失败: " + e.getMessage());
+            XposedBridge.log("[" + TAG + "] 保存 Maps 失败: " + e.getMessage());
         }
-        
-        return regions;
     }
     
-    private static void dumpMemoryRegion(MemoryRegion region, String libName) {
+    private static void saveFtyguardInfo(List<String> lines) {
         try {
-            long size = region.end - region.start;
-            if (size <= 0 || size > 50 * 1024 * 1024) {
-                return;
+            File outputFile = new File(LOG_DIR, "ftyguard_maps.txt");
+            FileOutputStream fos = new FileOutputStream(outputFile);
+            for (String line : lines) {
+                fos.write((line + "\n").getBytes());
             }
-            
-            byte[] buffer = new byte[(int) size];
-            RandomAccessFile mem = new RandomAccessFile("/proc/self/mem", "r");
-            mem.seek(region.start);
-            int read = mem.read(buffer);
-            mem.close();
-            
-            if (read > 0) {
-                String filename = String.format("dump_%s_%x_%x.bin", 
-                    libName.replaceAll("[^a-zA-Z0-9]", "_"),
-                    region.start, region.end);
-                File outputFile = new File(LOG_DIR, filename);
-                FileOutputStream fos = new FileOutputStream(outputFile);
-                fos.write(buffer, 0, read);
-                fos.close();
-                
-                XposedBridge.log("[" + TAG + "] [+] Dump 完成: " + filename + " (" + read + " bytes)");
-            }
+            fos.close();
+            XposedBridge.log("[" + TAG + "] [+] ftyguard 信息已保存: " + outputFile.getAbsolutePath());
         } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] Dump 区域失败: " + e.getMessage());
-        }
-    }
-    
-    private static class MemoryRegion {
-        long start;
-        long end;
-        String perms;
-        String name;
-        
-        MemoryRegion(long start, long end, String perms, String name) {
-            this.start = start;
-            this.end = end;
-            this.perms = perms;
-            this.name = name;
-        }
-        
-        @Override
-        public String toString() {
-            return String.format("%x-%x %s %s", start, end, perms, name);
+            XposedBridge.log("[" + TAG + "] 保存 ftyguard 信息失败: " + e.getMessage());
         }
     }
 }
