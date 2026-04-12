@@ -2,12 +2,3 @@
 plugins {
     id 'com.android.application' version '8.1.0' apply false
 }
-
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-        // Xposed Framework repository
-        maven { url 'https://api.xposed.info/' }
-    }
-}
