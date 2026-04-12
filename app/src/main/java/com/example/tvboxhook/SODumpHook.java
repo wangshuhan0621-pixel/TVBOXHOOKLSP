@@ -1,6 +1,8 @@
 package com.example.tvboxhook;
 
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -18,9 +20,11 @@ public class SODumpHook {
     private static final String TAG = "SODumpHook";
     private static String LOG_DIR;
     private static int dumpCount = 0;
+    private static Handler handler;
     
     public static void init(XC_LoadPackage.LoadPackageParam lpparam, Context context, String logDir) {
         LOG_DIR = logDir;
+        handler = new Handler(Looper.getMainLooper());
         
         XposedBridge.log("[" + TAG + "] 初始化 SO Dump Hook...");
         
@@ -38,11 +42,22 @@ public class SODumpHook {
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         String libPath = (String) param.args[0];
                         XposedBridge.log("[" + TAG + "] [BEFORE] System.load: " + libPath);
+                    }
+                    
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        String libPath = (String) param.args[0];
+                        XposedBridge.log("[" + TAG + "] [AFTER] System.load: " + libPath);
                         
                         // 检查是否是 ftyguard 相关的 SO
                         if (libPath != null && (libPath.contains("fty") || libPath.contains("guard"))) {
                             XposedBridge.log("[" + TAG + "] [!!!] 捕获到 ftyguard SO: " + libPath);
-                            dumpSO(libPath);
+                            
+                            // 延迟 2 秒后复制，确保解密完成
+                            final String path = libPath;
+                            handler.postDelayed(() -> {
+                                dumpSO(path);
+                            }, 2000);
                         }
                     }
                 });
