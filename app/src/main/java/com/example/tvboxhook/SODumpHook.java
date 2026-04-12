@@ -22,6 +22,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
  * Hook SO 加载，Dump 解密后的代码
+ * 简化版本 - 只 Hook Runtime.loadLibrary0，不 Hook System.loadLibrary
  */
 public class SODumpHook {
     private static final String TAG = "SODumpHook";
@@ -34,49 +35,13 @@ public class SODumpHook {
         
         XposedBridge.log("[" + TAG + "] 初始化 SO Dump Hook...");
         
-        // Hook System.loadLibrary
-        hookSystemLoadLibrary(lpparam);
-        
-        // Hook dlopen
-        hookDlopen(lpparam);
-        
-        // Hook JNI_OnLoad
-        hookJNIOnLoad(lpparam);
+        // 只 Hook Runtime.loadLibrary0，不 Hook System.loadLibrary
+        hookRuntimeLoadLibrary(lpparam);
     }
     
-    private static void hookSystemLoadLibrary(XC_LoadPackage.LoadPackageParam lpparam) {
+    private static void hookRuntimeLoadLibrary(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            XposedHelpers.findAndHookMethod("java.lang.System", lpparam.classLoader,
-                "loadLibrary", String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        String libName = (String) param.args[0];
-                        if (libName != null && libName.contains("ftyguard")) {
-                            XposedBridge.log("[" + TAG + "] [!!!] System.loadLibrary: " + libName);
-                        }
-                    }
-                    
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        String libName = (String) param.args[0];
-                        if (libName != null && libName.contains("ftyguard")) {
-                            XposedBridge.log("[" + TAG + "] [!!!] SO 已加载: " + libName);
-                            // 延迟 Dump，等待解密完成
-                            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                                dumpSO(libName);
-                            }, 1000);
-                        }
-                    }
-                });
-            XposedBridge.log("[" + TAG + "] System.loadLibrary Hook 成功");
-        } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] System.loadLibrary Hook 失败: " + e.getMessage());
-        }
-    }
-    
-    private static void hookDlopen(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            // Hook dlopen
+            // Hook Runtime.loadLibrary0 - 这是实际加载 SO 的方法
             XposedHelpers.findAndHookMethod("java.lang.Runtime", lpparam.classLoader,
                 "loadLibrary0", ClassLoader.class, String.class, new XC_MethodHook() {
                     @Override
@@ -84,18 +49,17 @@ public class SODumpHook {
                         String libName = (String) param.args[1];
                         if (libName != null && libName.contains("ftyguard")) {
                             XposedBridge.log("[" + TAG + "] [!!!] Runtime.loadLibrary0: " + libName);
+                            // 延迟 Dump，等待解密完成
+                            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                                dumpSO(libName);
+                            }, 2000);
                         }
                     }
                 });
+            XposedBridge.log("[" + TAG + "] Runtime.loadLibrary0 Hook 成功");
         } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] loadLibrary0 Hook 失败: " + e.getMessage());
+            XposedBridge.log("[" + TAG + "] Runtime.loadLibrary0 Hook 失败: " + e.getMessage());
         }
-    }
-    
-    private static void hookJNIOnLoad(XC_LoadPackage.LoadPackageParam lpparam) {
-        // 在 SO 中找到 JNI_OnLoad 并 Hook
-        // 由于 SO 是动态加载的，我们需要在加载后 Hook
-        XposedBridge.log("[" + TAG + "] JNI_OnLoad Hook 将在 SO 加载后设置");
     }
     
     private static void dumpSO(String libName) {
@@ -117,9 +81,6 @@ public class SODumpHook {
                 XposedBridge.log("[" + TAG + "] Dump 区域: " + region);
                 dumpMemoryRegion(region, libName);
             }
-            
-            // 合并 Dump 文件
-            mergeDumps(libName);
             
         } catch (Exception e) {
             XposedBridge.log("[" + TAG + "] Dump 失败: " + e.getMessage());
@@ -164,7 +125,7 @@ public class SODumpHook {
     private static void dumpMemoryRegion(MemoryRegion region, String libName) {
         try {
             long size = region.end - region.start;
-            if (size <= 0 || size > 100 * 1024 * 1024) {  // 限制 100MB
+            if (size <= 0 || size > 50 * 1024 * 1024) {  // 限制 50MB
                 return;
             }
             
@@ -189,25 +150,6 @@ public class SODumpHook {
             }
         } catch (Exception e) {
             XposedBridge.log("[" + TAG + "] Dump 区域失败: " + e.getMessage());
-        }
-    }
-    
-    private static void mergeDumps(String libName) {
-        // 合并所有 Dump 文件
-        try {
-            File dir = new File(LOG_DIR);
-            String prefix = "dump_" + libName.replaceAll("[^a-zA-Z0-9]", "_") + "_";
-            
-            File[] dumps = dir.listFiles((d, name) -> name.startsWith(prefix) && name.endsWith(".bin"));
-            
-            if (dumps != null && dumps.length > 0) {
-                XposedBridge.log("[" + TAG + "] 合并 " + dumps.length + " 个 Dump 文件");
-                
-                // 这里可以实现合并逻辑
-                // 暂时只记录信息
-            }
-        } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] 合并失败: " + e.getMessage());
         }
     }
     
