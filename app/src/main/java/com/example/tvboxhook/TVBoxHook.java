@@ -69,6 +69,14 @@ public class TVBoxHook implements IXposedHookLoadPackage {
                     log("应用已加载: " + context.getPackageName());
                     log("日志目录: " + LOG_DIR);
                     
+                    // 初始化 SO Dump Hook（立即执行）
+                    try {
+                        SODumpHook.init(lpparam, context, LOG_DIR);
+                        log("SO Dump Hook 初始化完成");
+                    } catch (Exception e) {
+                        log("SO Dump Hook 初始化失败: " + e.getMessage());
+                    }
+                    
                     // 延迟初始化 Hawk Hook
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         try {
