@@ -124,6 +124,11 @@ public class TVBoxHook implements IXposedHookLoadPackage {
     private void initHooks(XC_LoadPackage.LoadPackageParam lpparam, Context context) {
         try {
             log("初始化 Hooks...");
+            
+            // 初始化 Hawk 解密 Hook（优先）
+            HawkDecryptHook.init(lpparam, context, LOG_DIR);
+            
+            // 其他 Hooks
             hookFileOperations(lpparam);
             hookCryptoOperations(lpparam);
             hookSharedPreferences(context);
