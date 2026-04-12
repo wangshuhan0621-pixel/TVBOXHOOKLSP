@@ -56,10 +56,15 @@ jobs:
           -dname "CN=TVBoxHook, OU=TVBoxHook, O=TVBoxHook, L=Unknown, ST=Unknown, C=Unknown"
         echo "Signing key generated successfully"
 
-    - name: Sign APK
+    - name: Find apksigner and Sign APK
       run: |
+        echo "Finding apksigner..."
+        # Find the latest build-tools version
+        BUILD_TOOLS_DIR=$(ls -d ${ANDROID_SDK_ROOT}/build-tools/* | sort -V | tail -1)
+        echo "Using build-tools: $BUILD_TOOLS_DIR"
+        APK_SIGNER="$BUILD_TOOLS_DIR/apksigner"
         echo "Signing APK..."
-        ${ANDROID_SDK_ROOT}/build-tools/33.0.0/apksigner sign \
+        $APK_SIGNER sign \
           --ks tvboxhook.keystore \
           --ks-pass pass:tvboxhook \
           --key-pass pass:tvboxhook \
@@ -70,7 +75,8 @@ jobs:
     - name: Verify APK
       run: |
         echo "Verifying APK..."
-        ${ANDROID_SDK_ROOT}/build-tools/33.0.0/apksigner verify TVBoxHook-signed.apk
+        BUILD_TOOLS_DIR=$(ls -d ${ANDROID_SDK_ROOT}/build-tools/* | sort -V | tail -1)
+        $BUILD_TOOLS_DIR/apksigner verify TVBoxHook-signed.apk
         ls -lh TVBoxHook-signed.apk
 
     - name: Upload APK
