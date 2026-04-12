@@ -87,25 +87,6 @@ public class SODumpHook {
         } catch (Exception e) {
             XposedBridge.log("[" + TAG + "] System.load Hook 失败: " + e.getMessage());
         }
-        
-        try {
-            // Hook Runtime.load0
-            XposedHelpers.findAndHookMethod("java.lang.Runtime", lpparam.classLoader,
-                "load0", ClassLoader.class, String.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        String libPath = (String) param.args[1];
-                        XposedBridge.log("[" + TAG + "] Runtime.load0: " + libPath);
-                        if (libPath != null && libPath.contains("ftyguard")) {
-                            XposedBridge.log("[" + TAG + "] [!!!] 捕获 ftyguard Runtime 加载: " + libPath);
-                            scheduleDump("ftyguard");
-                        }
-                    }
-                });
-            XposedBridge.log("[" + TAG + "] Runtime.load0 Hook 成功");
-        } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] Runtime.load0 Hook 失败: " + e.getMessage());
-        }
     }
     
     private static void startMapsScanner() {
