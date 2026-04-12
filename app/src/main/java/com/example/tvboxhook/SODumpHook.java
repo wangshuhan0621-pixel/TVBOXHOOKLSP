@@ -4,9 +4,14 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
+import java.util.ArrayList;
+import java.util.List;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -14,13 +19,14 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Hook SO 加载，复制解密后的 SO 文件
+ * Hook SO 加载，从内存 dump 解密后的 SO
  */
 public class SODumpHook {
     private static final String TAG = "SODumpHook";
     private static String LOG_DIR;
     private static int dumpCount = 0;
     private static Handler handler;
+    private static List<String> soPaths = new ArrayList<>();
     
     public static void init(XC_LoadPackage.LoadPackageParam lpparam, Context context, String logDir) {
         LOG_DIR = logDir;
@@ -28,8 +34,11 @@ public class SODumpHook {
         
         XposedBridge.log("[" + TAG + "] 初始化 SO Dump Hook...");
         
-        // Hook System.load - 这是 ftyguard 实际使用的加载方式
+        // Hook System.load
         hookSystemLoad(lpparam);
+        
+        // 启动内存扫描器
+        startMemoryScanner();
         
         XposedBridge.log("[" + TAG + "] SO Dump Hook 初始化完成");
     }
@@ -42,22 +51,10 @@ public class SODumpHook {
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         String libPath = (String) param.args[0];
                         XposedBridge.log("[" + TAG + "] [BEFORE] System.load: " + libPath);
-                    }
-                    
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        String libPath = (String) param.args[0];
-                        XposedBridge.log("[" + TAG + "] [AFTER] System.load: " + libPath);
                         
-                        // 检查是否是 ftyguard 相关的 SO
                         if (libPath != null && (libPath.contains("fty") || libPath.contains("guard"))) {
+                            soPaths.add(libPath);
                             XposedBridge.log("[" + TAG + "] [!!!] 捕获到 ftyguard SO: " + libPath);
-                            
-                            // 延迟 2 秒后复制，确保解密完成
-                            final String path = libPath;
-                            handler.postDelayed(() -> {
-                                dumpSO(path);
-                            }, 2000);
                         }
                     }
                 });
@@ -67,38 +64,80 @@ public class SODumpHook {
         }
     }
     
-    private static void dumpSO(String libPath) {
+    private static void startMemoryScanner() {
+        // 延迟 5 秒后开始扫描
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                scanAndDumpFromMemory();
+                // 继续扫描
+                handler.postDelayed(this, 3000);
+            }
+        }, 5000);
+        XposedBridge.log("[" + TAG + "] 内存扫描器已启动");
+    }
+    
+    private static void scanAndDumpFromMemory() {
         try {
-            File srcFile = new File(libPath);
-            if (!srcFile.exists()) {
-                XposedBridge.log("[" + TAG + "] SO 文件不存在: " + libPath);
+            BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream("/proc/self/maps")));
+            String line;
+            
+            while ((line = reader.readLine()) != null) {
+                // 查找 ftyguard 的内存映射
+                if (line.contains("fty") || line.contains("guard")) {
+                    XposedBridge.log("[" + TAG + "] [!!!] Maps 中发现: " + line);
+                    
+                    // 解析内存地址
+                    String[] parts = line.split("\\s+");
+                    if (parts.length >= 2) {
+                        String[] addrs = parts[0].split("-");
+                        if (addrs.length == 2) {
+                            long start = Long.parseLong(addrs[0], 16);
+                            long end = Long.parseLong(addrs[1], 16);
+                            long size = end - start;
+                            
+                            // 检查是否是可执行区域（代码段）
+                            if (parts[1].contains("x") && size > 0 && size < 50 * 1024 * 1024) {
+                                dumpMemoryRegion(start, end, "ftyguard_mem_" + dumpCount);
+                                dumpCount++;
+                            }
+                        }
+                    }
+                }
+            }
+            reader.close();
+        } catch (Exception e) {
+            XposedBridge.log("[" + TAG + "] 内存扫描失败: " + e.getMessage());
+        }
+    }
+    
+    private static void dumpMemoryRegion(long start, long end, String name) {
+        try {
+            long size = end - start;
+            if (size <= 0 || size > 50 * 1024 * 1024) {
                 return;
             }
             
-            // 创建目标文件名
-            String filename = "ftyguard_dump_" + dumpCount + ".so";
-            File destFile = new File(LOG_DIR, filename);
+            // 读取内存
+            byte[] buffer = new byte[(int) size];
+            RandomAccessFile mem = new RandomAccessFile("/proc/self/mem", "r");
+            mem.seek(start);
+            int read = mem.read(buffer);
+            mem.close();
             
-            // 复制文件
-            FileInputStream fis = new FileInputStream(srcFile);
-            FileOutputStream fos = new FileOutputStream(destFile);
-            
-            byte[] buffer = new byte[8192];
-            int read;
-            long total = 0;
-            while ((read = fis.read(buffer)) > 0) {
+            if (read > 0) {
+                // 保存到文件
+                String filename = name + "_" + Long.toHexString(start) + "_" + Long.toHexString(end) + ".bin";
+                File outputFile = new File(LOG_DIR, filename);
+                FileOutputStream fos = new FileOutputStream(outputFile);
                 fos.write(buffer, 0, read);
-                total += read;
+                fos.close();
+                
+                XposedBridge.log("[" + TAG + "] [+] 内存已 dump: " + filename + " (" + read + " bytes)");
             }
-            
-            fis.close();
-            fos.close();
-            
-            dumpCount++;
-            XposedBridge.log("[" + TAG + "] [+] SO 已复制: " + destFile.getAbsolutePath() + " (" + total + " bytes)");
-            
         } catch (Exception e) {
-            XposedBridge.log("[" + TAG + "] 复制 SO 失败: " + e.getMessage());
+            XposedBridge.log("[" + TAG + "] Dump 内存失败: " + e.getMessage());
         }
     }
 }
