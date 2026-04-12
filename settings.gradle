@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Xposed Framework repository
+        maven { url 'https://api.xposed.info/' }
     }
 }
 rootProject.name = "TVBoxHook"
