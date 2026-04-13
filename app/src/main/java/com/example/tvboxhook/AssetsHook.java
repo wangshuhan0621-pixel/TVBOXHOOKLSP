@@ -155,10 +155,14 @@ public class AssetsHook {
         
         // 检查是否是可读的 JSON/XML
         if (data.length > 10) {
-            String start = new String(data, 0, Math.min(100, data.length), "UTF-8");
-            if (start.trim().startsWith("{") || start.trim().startsWith("[") || 
-                start.trim().startsWith("<") || start.trim().startsWith("http")) {
-                return true;
+            try {
+                String start = new String(data, 0, Math.min(100, data.length), "UTF-8");
+                if (start.trim().startsWith("{") || start.trim().startsWith("[") || 
+                    start.trim().startsWith("<") || start.trim().startsWith("http")) {
+                    return true;
+                }
+            } catch (Exception e) {
+                // 忽略编码错误
             }
         }
         
