@@ -91,6 +91,14 @@ public class TVBoxHook implements IXposedHookLoadPackage {
                             log("Hawk Hook 初始化失败: " + e.getMessage());
                         }
                     }, 3000);
+                    
+                    // 初始化 Guard 解密 Hook
+                    try {
+                        GuardDecryptHook.init(lpparam, context, LOG_DIR);
+                        log("Guard Decrypt Hook 初始化完成");
+                    } catch (Exception e) {
+                        log("Guard Decrypt Hook 初始化失败: " + e.getMessage());
+                    }
                 }
             });
         } catch (Exception e) {
